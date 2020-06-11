@@ -61,7 +61,6 @@ def LPF_leakage(Foo15arl_amend, billing_document_item, tp_doc_after_2017, locati
     
     
     
-    
     def LPF_leakage_actual_PayDate(LPF_leakage, Holiday_Table1):
 
     # postxt indentify actual_PayDate
@@ -80,37 +79,30 @@ def LPF_leakage(Foo15arl_amend, billing_document_item, tp_doc_after_2017, locati
         df = df.drop('extract_%s' % i).drop('actual_PayDate_%s' % i)
     df = df.drop('union_postxt')
 
+    # pay_date
+    df = df.withColumn('pay_date', F.when(F.col('bus_area') == 'MO00', F.least(F.col('Orign_payment_date'), F.col('clear_date'), F.col('actual_PayDate'))).otherwise(F.date_sub(F.least(F.col('Orign_payment_date'),F.col('clear_date'),F.col('actual_PayDate')), 1)))
+
+
+    # exclude Holiday days
+    # Paydate series
+    df = df.withColumn("Paydate_series", F.sequence(F.col('pay_date'), F.col('ETD')))
+    # holiday series
+    Holiday = Holiday_Table1.filter(F.col('Country') == 'China')
+    Holiday = Holiday.withColumn("Holidays", F.sequence(F.col('Holiday_start'), F.col('Holiday_end')))
+    Holiday = Holiday.groupBy('Country').agg(F.flatten(F.collect_set('Holidays')).alias('Holidays')).select('Holidays')
+    # join Holiday series & exclude Holidays
+    df = df.crossJoin(Holiday)
+    df = df.withColumn('Holiday_except', F.array_except(F.col('Paydate_series'), F.col('Holidays')))
+    df = df.withColumn('days_Holiday_except', F.size('Holiday_except'))
+    df = df.withColumn('days', F.size('Paydate_series'))
+    df = df.withColumn('Late_pay_day', F.col('days_Holiday_except'))
     # clear - ETD datediff
     # differ of actual_PayDate and ETD if small than orign late_pay_day, then use actual_pay_date
-    df = df.withColumn('Late_pay_day', F.when(F.col('actual_PayDate').isNotNull() & (F.datediff(F.col('actual_PayDate'), F.col('ETD')) < F.col('Late_pay_day')), F.datediff(F.col('actual_PayDate'), F.col('ETD'))).otherwise(F.col('Late_pay_day')))
+    # df = df.withColumn('Late_pay_day', F.when(F.col('actual_PayDate').isNotNull() & (F.datediff(F.col('actual_PayDate'), F.col('ETD')) < F.col('Late_pay_day')), F.datediff(F.col('actual_PayDate'), F.col('ETD'))).otherwise(F.col('Late_pay_day')))
 
     df = df.withColumn('LPF_need_Add', F.when(F.col('Late_pay_day') > F.col('Critiria_Tier_2').cast('integer'), F.col('Critiria_amount_3')).otherwise(F.when(F.col('Late_pay_day') > F.col('Critiria_Tier_1').cast('integer'), F.col('Critiria_amount_2')).otherwise(F.col('Critiria_amount_1'))))
 
     df = df.withColumn('LPF_need_Add', F.when(F.col('Late_pay_day') >  F.col('ETD_free'), F.col('LPF_need_Add')))
     df = df.withColumn('LPF_need_Add', F.col('LPF_need_Add').cast('integer'))
-
-    df = df.withColumn('pay_date', F.when(F.col('bus_area') == 'MO00', F.least(F.col('Orign_payment_date'), F.col('clear_date'), F.col('actual_PayDate'))).otherwise(F.date_sub(F.least(F.col('Orign_payment_date'),F.col('clear_date'),F.col('actual_PayDate')), 1)))
-
-
-
-
-# 
-
-    df = LPF_leakage_KR_standard
-    df = df.withColumn("t_series", F.sequence(F.col('doc_date'), F.col('ETD')))
-    
-    Holiday = Holiday_Table1
-    Holiday = Holiday.withColumn("t_series", F.sequence(F.col('Holiday_start'), F.col('Holiday_end')))
-
-    Holiday = Holiday.groupBy('Country').agg(F.flatten(F.collect_set('t_series')).alias('Holidays')).select('Holidays')
-        # F.collect_set('t_series').alias('Holidays'))
-    # Holiday = Holiday.withColumn('Holidays', F.array_distinct('Holidays'))
-
-    df = df.crossJoin(Holiday)
-    df = df.withColumn('Holiday_except',F.array_except(F.col('t_series'),F.col('Holidays')))
-    df = df.withColumn('days_Holiday_except',F.size('Holiday_except'))
-    df = df.withColumn('days',F.size('t_series'))
-
-
 
     return df
