@@ -1,0 +1,116 @@
+def LPF_leakage(Foo15arl_amend, billing_document_item, tp_doc_after_2017, location, APA_LPF_Charge_Rule_Summary_CHINA_amand):
+
+    #  invoice  vs LPF
+    df = Foo15arl_amend.filter(F.col('doc_date') >= '2019-12-01')
+    # remove canceled invoice
+    df = df.filter(F.col('facbdcani').isNull() & F.col('foccanin').isNull())
+    # df = df.filter((F.datediff(F.col('clear_date'),'doc_date') > 11) & (F.col('ac_doc_typ') =='RV') & F.col('ref_key2').like('%EXPORT%'))
+    df = df.filter((F.col('ac_doc_typ') =='RV') & F.col('ref_key2').like('%EXPORT%'))
+
+    df = df[df.bus_area.isin('MO00','CN00','HK00')]
+
+    # LPF filter
+    LPF = billing_document_item.filter(F.col('charge_code') == 'LPF').select(F.col('billing_document_id').alias('ac_doc_no'),F.col('billing_document_date').alias('doc_date'),F.col('document_currency_code').alias('LPF_currency'),F.col('net_document_value_in_document_currency').alias('LPF_amount_dc'),'document_currency_code').distinct()
+    LPF = LPF.withColumn('LPF_amount_dc', F.when(F.col('document_currency_code') == 'USD', F.col('LPF_amount_dc') * 7).when(F.col('document_currency_code') == 'HKD', F.col('LPF_amount_dc') * 0.91).otherwise(F.col('LPF_amount_dc')))
+    df = df.join(LPF,['ac_doc_no','doc_date'],'left').distinct().drop('postxt') # drop RV's txt
+
+
+    # JOIN clear no post txt 
+    clr_txt = Foo15arl_amend.select(F.col('ac_doc_no').alias('clr_doc_no'), 'debitor','comp_code','bus_area','postxt') \
+                            .join(df.select('clr_doc_no','debitor','comp_code','bus_area'), ['clr_doc_no','debitor','comp_code','bus_area'],'inner') \
+                            .groupBy('clr_doc_no','debitor','comp_code','bus_area').agg(F.collect_set('postxt').alias('postxt'))
+    
+    df = df.join(clr_txt,['clr_doc_no','debitor','comp_code','bus_area'],'left')
+    
+    clr_txt_dd = Foo15arl_amend.filter(((F.substring(F.col('ac_doc_no'),1,2) == '34') | (F.substring(F.col('ac_doc_no'),1,2) == '20')) & (F.substring(F.col('clr_doc_no'),1,2) == '35')) \
+                               .groupBy('clr_doc_no', 'debitor','comp_code','bus_area',F.col('doc_date').alias('Orign_payment_date')).agg(F.collect_set('postxt').alias('Orign_pay_postxt'))
+                               #  .select('clr_doc_no', 'debitor','comp_code','bus_area', F.col('postxt').alias('Orign_pay_postxt'),F.col('doc_date').alias('Orign_payment_date'))
+    df = df.join(clr_txt_dd,['clr_doc_no','debitor','comp_code','bus_area'],'left')
+
+
+
+    #  BL level summary
+    df = df.groupBy('comp_code','debitor','alloc_nmbr','bus_area').agg(F.count('LPF_amount_dc').alias('LPF_BL_COUNT'), F.sum('LPF_amount_dc').alias('sum_LPF'), F.collect_set('pmnttrms').alias('pmnttrms'), F.collect_set('clr_doc_no').alias('clr_doc_no'),F.collect_set('postxt').alias('postxt'),F.collect_set('Orign_pay_postxt').alias('Orign_pay_postxt'), F.min('clear_date').alias('clear_date'),F.min('Orign_payment_date').alias('Orign_payment_date'))
+
+    # direct
+    # on-offset
+
+    # ETD
+    tp = tp_doc_after_2017.select(F.col('tp_doc_number').alias('alloc_nmbr'),F.col('origin_departure_date').alias('ETD'),'origin_loc')
+    df = df.join(tp,'alloc_nmbr','left')
+    df = df.filter(F.col('ETD') > '2020-01-01')
+    # join POD,POR - city,country
+    origin_loc = location.select(F.col('location_id').alias('origin_loc'),F.col('country').alias('POR_country')).distinct()
+    df = df.join(origin_loc,'origin_loc','left').drop('origin_loc').distinct()
+
+    # clear - ETD datediff
+    
+    # df = df.withColumn('Late_pay_day', F.when(F.col('bus_area') == 'MO00', F.datediff(F.col('clear_date'), F.col('ETD'))).otherwise(F.datediff(F.col('clear_date'), F.col('ETD')) - 1))
+    df = df.withColumn('Late_pay_day', F.when(F.col('bus_area') == 'MO00', F.datediff(F.least(F.col('Orign_payment_date'),F.col('clear_date')), F.col('ETD'))).otherwise(F.datediff(F.least(F.col('Orign_payment_date'),F.col('clear_date')), F.col('ETD')) - 1))
+    
+
+    # join LPF rule
+    rule = APA_LPF_Charge_Rule_Summary_CHINA_amand.filter(F.col('payat_location').isNull()).select('comp_code','bus_area','ETD_free','Chrg_time','Critiria_Tier_1','Critiria_Tier_2','Critiria_amount_1','Critiria_amount_2','Critiria_amount_3')
+    df = df.join(rule,['comp_code','bus_area'],'left').filter(F.col('Chrg_time') > 0).filter(F.col('Late_pay_day') > F.col('ETD_free')).distinct()
+    df = df.withColumn('LPF_need_Add', F.when(F.col('Late_pay_day') > F.col('Critiria_Tier_2').cast('integer'), F.col('Critiria_amount_3')).otherwise(F.when(F.col('Late_pay_day') > F.col('Critiria_Tier_1').cast('integer'), F.col('Critiria_amount_2')).otherwise(F.col('Critiria_amount_1'))))
+    df = df.withColumn('LPF_need_Add',F.col('LPF_need_Add').cast('integer'))
+
+
+
+    return df
+    
+    
+    
+    
+    def LPF_leakage_actual_PayDate(LPF_leakage, Holiday_Table1):
+
+    # postxt indentify actual_PayDate
+    rtxt = '(CN[A-Z]{2}/[0-9]+/.+/)([0-9]{4})'
+
+    df = LPF_leakage.withColumn('union_postxt', F.array_union(F.col('postxt'),F.col('Orign_pay_postxt')))
+
+    df = df.withColumn('size', F.size('union_postxt'))
+    for i in range(1,8):
+        df = df.withColumn('extract_%s' % i, F.when(F.col('size') >= i,  F.regexp_extract(F.slice(F.col('union_postxt'),i,1).cast('string'), rtxt,2)))
+        df = df.withColumn('extract_%s' % i, F.when(F.col('extract_%s' % i).isNotNull(), F.concat(F.lit('2020'),F.col('extract_%s' % i))))
+        df = df.withColumn('actual_PayDate_%s' % i, F.when(F.col('extract_%s' % i).isNotNull(), F.to_date(F.col('extract_%s' % i), 'yyyyMMdd')))
+
+    df = df.withColumn('actual_PayDate', F.least(F.col('actual_PayDate_1'),F.col('actual_PayDate_2'),F.col('actual_PayDate_3'),F.col('actual_PayDate_4')))
+    for i in range(1,8):
+        df = df.drop('extract_%s' % i).drop('actual_PayDate_%s' % i)
+    df = df.drop('union_postxt')
+
+    # clear - ETD datediff
+    # differ of actual_PayDate and ETD if small than orign late_pay_day, then use actual_pay_date
+    df = df.withColumn('Late_pay_day', F.when(F.col('actual_PayDate').isNotNull() & (F.datediff(F.col('actual_PayDate'), F.col('ETD')) < F.col('Late_pay_day')), F.datediff(F.col('actual_PayDate'), F.col('ETD'))).otherwise(F.col('Late_pay_day')))
+
+    df = df.withColumn('LPF_need_Add', F.when(F.col('Late_pay_day') > F.col('Critiria_Tier_2').cast('integer'), F.col('Critiria_amount_3')).otherwise(F.when(F.col('Late_pay_day') > F.col('Critiria_Tier_1').cast('integer'), F.col('Critiria_amount_2')).otherwise(F.col('Critiria_amount_1'))))
+
+    df = df.withColumn('LPF_need_Add', F.when(F.col('Late_pay_day') >  F.col('ETD_free'), F.col('LPF_need_Add')))
+    df = df.withColumn('LPF_need_Add', F.col('LPF_need_Add').cast('integer'))
+
+    df = df.withColumn('pay_date', F.when(F.col('bus_area') == 'MO00', F.least(F.col('Orign_payment_date'), F.col('clear_date'), F.col('actual_PayDate'))).otherwise(F.date_sub(F.least(F.col('Orign_payment_date'),F.col('clear_date'),F.col('actual_PayDate')), 1)))
+
+
+
+
+# 
+
+    df = LPF_leakage_KR_standard
+    df = df.withColumn("t_series", F.sequence(F.col('doc_date'), F.col('ETD')))
+    
+    Holiday = Holiday_Table1
+    Holiday = Holiday.withColumn("t_series", F.sequence(F.col('Holiday_start'), F.col('Holiday_end')))
+
+    Holiday = Holiday.groupBy('Country').agg(F.flatten(F.collect_set('t_series')).alias('Holidays')).select('Holidays')
+        # F.collect_set('t_series').alias('Holidays'))
+    # Holiday = Holiday.withColumn('Holidays', F.array_distinct('Holidays'))
+
+    df = df.crossJoin(Holiday)
+    df = df.withColumn('Holiday_except',F.array_except(F.col('t_series'),F.col('Holidays')))
+    df = df.withColumn('days_Holiday_except',F.size('Holiday_except'))
+    df = df.withColumn('days',F.size('t_series'))
+
+
+
+    return df
