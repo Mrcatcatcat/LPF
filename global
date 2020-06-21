@@ -1,0 +1,248 @@
+def APA_LPF (Foo15arl_amend, billing_document_item, tp_doc_after_2017, location, APA_LPF_Charge_Rule_Summary_CHINA_amand,dispute_instance,Holiday_Table1, multiple_AFR_check, Currency_exchange_rate):
+    df = Foo15arl_amend.filter(F.col('doc_date') >= '2019-12-01')
+    df = df[df.bus_area.isin(['HK00','CN00','MO00','KR00','PH00','MY00','SG00','JP00','TW00','VN00','KH00','AU00','MM00','NZ00','PG00','TH00'])]
+
+    #  LPF invoice
+    LPF = billing_document_item.filter(F.col('charge_code') == 'LPF').select('division_country_id',F.col('billing_document_id').alias('ac_doc_no'),F.col('billing_document_date').alias('doc_date'),F.col('document_currency_code').alias('LPF_applied_currency'),F.col('net_document_value_in_document_currency').alias('LPF_amount_dc'), 'document_currency_code','exchange_rate_document_to_local_currency').distinct()
+    # LPF USD amount ,KR * 0.1
+    LPF = LPF.withColumn('LPF_amount_USD', F.when(F.col('document_currency_code') == 'USD', F.col('LPF_amount_dc')).otherwise(F.col('LPF_amount_dc') * F.col('exchange_rate_document_to_local_currency')))
+    LPF = LPF.withColumn('LPF_amount_USD', F.when((F.col('document_currency_code') != 'USD') & (F.col('division_country_id') == 'KR'), F.col('LPF_amount_USD') * 0.1).otherwise(F.col('LPF_amount_USD')))
+
+    # BL level, LPF amount(usd,dc)/ BL amount(all type) /LPF billed
+    BL = df.join(LPF, ['ac_doc_no','doc_date'], 'left').distinct()
+    BL = BL.filter(F.length('alloc_nmbr') == 9).groupBy('comp_code','debitor','alloc_nmbr','bus_area').agg(F.round(F.sum('deb_cre_lc'), 2).alias('BL_usd_amount'), F.round(F.sum('LPF_amount_USD'), 2).alias('LPF_applied_USD_BL'), F.collect_set('LPF_applied_currency').alias('LPF_applied_currency'), F.round(F.sum('LPF_amount_dc'), 2).alias('LPF_applied_dc_BL'))
+
+    BL = BL.withColumn('LPF_billed', F.when(F.col('LPF_applied_USD_BL').isNotNull(),'Y'))
+
+    # BL level, join shipment data
+    tp = tp_doc_after_2017.select(F.col('tp_doc_number').alias('alloc_nmbr'), F.col('transport_start_date').alias('ETD'), F.col('destination_arrival_date').alias('ETA'), 'origin_loc','destination_loc')
+    BL = BL.join(tp, 'alloc_nmbr', 'left')
+
+    # BL join POD,POR Country
+    # origin_loc = location.select(F.col('location_id').alias('origin_loc'),F.col('country').alias('POR_country')).distinct()
+    origin_loc = location.select(F.col('location_id').alias('origin_loc'), F.col('country').alias('POR_country')).distinct()
+    destination_loc = location.select(F.col('location_id').alias('destination_loc'),F.col('country').alias('POD_country')).distinct()
+    BL = BL.join(origin_loc,'origin_loc','left').drop('origin_loc').distinct()
+    BL = BL.join(destination_loc,'destination_loc','left').drop('destination_loc').distinct()
+    # cut off ETD before 2019-12-01
+    BL = BL.filter(F.col('ETD') >= '2019-12-01')
+
+    # Is LPF invoice
+    LPF = LPF.select('ac_doc_no','doc_date', F.lit('Y').alias('LPF_inv')).distinct()
+    df = df.join(LPF,['ac_doc_no','doc_date'],'left').distinct()
+
+    # Invoice level, remove canceled invoice
+    df = df.filter(F.col('facbdcani').isNull() & F.col('foccanin').isNull())
+    # filter Freight invoice(EXPORT AND IMPORT) 
+    df = df.filter((F.col('ac_doc_typ') =='RV') & (F.col('ref_key2').like('%EXPORT%') | F.col('ref_key2').like('%IMPORT%')))
+
+    # BL level, payment term (EXPORT/IMPORT); Customer's EXPORT/IMPORT  has diferent payment term.  
+    BL_pmnttrms_exp = df.filter((F.length('alloc_nmbr') == 9) & F.col('ref_key2').like('%EXPORT%')).groupBy('comp_code','debitor','alloc_nmbr','bus_area').agg(F.collect_set('pmnttrms').alias('BL_pmnttrms_exp'))
+    BL_pmnttrms_imp = df.filter((F.length('alloc_nmbr') == 9) & F.col('ref_key2').like('%IMPORT%')).groupBy('comp_code','debitor','alloc_nmbr','bus_area').agg(F.collect_set('pmnttrms').alias('BL_pmnttrms_imp'))
+
+    BL = BL.join(BL_pmnttrms_exp,['comp_code','debitor','alloc_nmbr','bus_area'],'left')
+    BL = BL.join(BL_pmnttrms_imp,['comp_code','debitor','alloc_nmbr','bus_area'],'left')
+    # filter > USD 0
+    df = df.filter(F.col('deb_cre_lc') > 0)
+    # Invoice level, simplify columns
+    df = df.select(
+        'ac_doc_no','comp_code','debitor','alloc_nmbr','bus_area',
+        'pmnttrms','doc_date','netduedate','clear_date','pmnt_block','dunn_block',
+        'loc_currcy','deb_cre_lc','ref_key2','clr_doc_no','LPF_inv'
+    )
+
+    # Join clear number post txt 
+    clr_txt = Foo15arl_amend.select(F.col('ac_doc_no').alias('clr_doc_no'), 'debitor','comp_code','bus_area','postxt') \
+                            .join(df.select('clr_doc_no','debitor','comp_code','bus_area'), ['clr_doc_no','debitor','comp_code','bus_area'],'inner') \
+                            .groupBy('clr_doc_no','debitor','comp_code','bus_area').agg(F.collect_set('postxt').alias('postxt'))
+
+    df = df.join(clr_txt,['clr_doc_no','debitor','comp_code','bus_area'],'left')
+    
+    # Orign_payment
+    # Join invoce is cleared by 34*/20* ONA's min doc_date and all postxt
+    # Find clear no is 35* and doc no is 34*/20*. select min of 34/20 doc date and all txt join to freight invoice.
+    clr_txt_dd = Foo15arl_amend.filter(((F.substring(F.col('ac_doc_no'),1,2) == '34') | (F.substring(F.col('ac_doc_no'),1,2) == '20')) & (F.substring(F.col('clr_doc_no'),1,2) == '35')) \
+                               .groupBy('clr_doc_no', 'debitor','comp_code','bus_area').agg(F.min(F.col('doc_date')).alias('Orign_payment_date'),F.collect_set('postxt').alias('Orign_pay_postxt'))
+                               #  .select('clr_doc_no', 'debitor','comp_code','bus_area', F.col('postxt').alias('Orign_pay_postxt'),F.col('doc_date').alias('Orign_payment_date'))
+    df = df.join(clr_txt_dd,['clr_doc_no','debitor','comp_code','bus_area'],'left')
+
+    # Invoice level, join Dispute status 
+    dispute = dispute_instance
+    window = Window.partitionBy('invoice_number').orderBy(F.col('case_id').desc())    
+    dispute = dispute.withColumn('row',  F.row_number().over(window))
+    dispute = dispute.filter(F.col('row') == 1).select(F.col('invoice_number').alias('ac_doc_no'), F.col('case_status_description').alias('dispute_status')).distinct()
+    df = df.join(dispute,'ac_doc_no','left').distinct()
+
+    
+    ############################################
+
+    # Join Global LPF rule 
+    rule = APA_LPF_Charge_Rule_Summary_CHINA_amand.filter(F.col('payat_location').isNull() & (F.col('Late_payment_Fee') == 'Yes')).drop('payat_location').distinct()
+    # rule: fill null of threshold to 0
+    rule = rule.na.fill({'Value_threshold_USD': 0})
+    df = df.join(rule,['comp_code','bus_area'],'inner')
+
+    # BL level,filter only exceed threshold, join ClearNo/ Txt/ OrignTxt/ dispute_status/ pmnt_block/ dunn_block/ ClearDate/ OrignPayDate
+    BL_summary = df.filter(F.length('alloc_nmbr') == 9)\
+                   .filter(F.col('deb_cre_lc') > F.col('Value_threshold_USD'))\
+                   .groupBy('comp_code','debitor','alloc_nmbr','bus_area')\
+                   .agg(F.collect_set('clr_doc_no').alias('clr_doc_no_BL'),
+                        F.collect_set('postxt').alias('postxt_BL'),
+                        F.collect_set('Orign_pay_postxt').alias('Orign_pay_postxt_BL'),
+                        F.collect_set('dispute_status').alias('dispute_status_BL'),
+                        F.collect_set('pmnt_block').alias('pmnt_block_BL'),
+                        F.collect_set('dunn_block').alias('dunn_block_BL'),
+                        F.min('clear_date').alias('clear_date_BL'), 
+                        F.min('Orign_payment_date').alias('Orign_payment_date_BL')
+                        )
+
+    BL = BL.join(BL_summary,['comp_code','debitor','alloc_nmbr','bus_area'],'left')
+
+    # Invoice level, Join BL level data 
+    df = df.join(BL,['comp_code','debitor','alloc_nmbr','bus_area'],'left')
+
+    # match rules 
+    # Invoice match rule of Exp, Imp
+    df = df.filter(((F.col('Exp') == 'Y') & F.col('ref_key2').like('%EXPORT%')) | ((F.col('Imp') == 'Y') & F.col('ref_key2').like('%IMPORT%')))
+
+    # Invoice match rule of cash/ credit customer  ??? whether CCRA invoice need to add LPF 
+    # df = df.filter((F.col('Credit_customer') == 'Y') | ((F.col('Credit_customer') == 'N') & (F.col('pmnttrms').like('%CR%') | F.col('pmnttrms').like('%00%'))))
+    df = df.filter((F.col('Credit_customer') == 'Y') | ((F.col('Credit_customer') == 'N') & (F.col('pmnttrms').like('%CR%') | F.col('pmnttrms').like('%00%'))))
+
+
+
+    # Export invoice: POR country same with Country of Business area
+    # Import invoice: POD country same with Country of Business area
+    In_country_condition = (((F.col('Imp') == 'Y') & (F.col('Country') == F.col('POD_country'))) | ((F.col('Exp') == 'Y') & (F.col('Country') == F.col('POR_country'))))
+    df = df.withColumn('Country_in_PORPOD', F.when(In_country_condition, 'Y').otherwise('N'))
+
+    # Charge date - ETD/ ETA/ docdate/ DueDate
+    df = df.withColumn('charge_date', F.when(F.col('charge_date') == 'ETD', F.col('ETD')).when(F.col('charge_date') == 'ETA', F.col('ETA')).when(F.col('charge_date') == 'InvoiceDate', F.col('doc_date')).when(F.col('charge_date') == 'DueDate', F.col('netduedate')))
+
+    # df = df.filter(F.col('charge_date').isNotNull())
+
+    # # Invoice level Late pay days
+    # df = df.withColumn('Late_pay_days', F.when(F.col('clear_date').isNull(), F.datediff(F.current_date(), F.col('charge_date'))).otherwise(F.datediff(F.least(F.col('Orign_payment_date'), F.col('clear_date')), F.col('charge_date'))))
+    
+    # df = df.filter(F.col('Late_pay_days') > F.col('free_day')).distinct()
+
+    # Charge Per invoice - pay date
+    df = df.withColumn('Pay_or_Current_date', F.when(F.col('clear_date').isNull(), F.current_date()).otherwise(F.least(F.col('Orign_payment_date'), F.col('clear_date'))))
+
+    # Charge per Booking - pay date ##############################
+
+        # BL level, Pay date in txt
+    rtxt = '(CN[A-Z]{2}/[0-9]+/.+/)([0-9]{4})'
+    df = df.withColumn('union_postxt_BL', F.array_union(F.col('postxt_BL'),F.col('Orign_pay_postxt_BL')))
+    df = df.withColumn('size', F.size('union_postxt_BL'))
+    for i in range(1,8):
+        df = df.withColumn('extract_%s' % i, F.when(F.col('size') >= i,  F.regexp_extract(F.slice(F.col('union_postxt_BL'), i, 1).cast('string'), rtxt,2)))
+        df = df.withColumn('extract_%s' % i, F.when(F.col('extract_%s' % i).isNotNull(), F.concat(F.lit('2020'),F.col('extract_%s' % i))))
+        df = df.withColumn('txt_PayDate_BL_%s' % i, F.when(F.col('extract_%s' % i).isNotNull(), F.to_date(F.col('extract_%s' % i), 'yyyyMMdd')))
+            # Earliest pay date in txt
+    df = df.withColumn('txt_PayDate_BL', F.least(F.col('txt_PayDate_BL_1'),F.col('txt_PayDate_BL_2'),F.col('txt_PayDate_BL_3'),F.col('txt_PayDate_BL_4')))
+    for i in range(1,8):
+        df = df.drop('extract_%s' % i).drop('txt_PayDate_BL_%s' % i)
+    df = df.drop('union_postxt_BL').drop('size')
+
+        # BL level, Earliest pay date
+    df = df.withColumn('Pay_or_Current_date_BL', F.when(F.col('bus_area').isin('CN00','HK00'), F.date_sub(F.least(F.col('Orign_payment_date_BL'), F.col('clear_date_BL'),F.col('txt_PayDate_BL')), 1)).otherwise(F.least(F.col('Orign_payment_date_BL'), F.col('clear_date_BL'), F.col('txt_PayDate_BL'))))
+        # BL level, Pay date is current date when No invoice been cleared
+    df = df.withColumn('Pay_or_Current_date_BL', F.when(F.col('clear_date_BL').isNull(), F.current_date()).otherwise(F.col('Pay_or_Current_date_BL')))
+    df = df.withColumn('Pay_or_Current_date', F.when(F.col('Charge_per_BookingInvoice') == 'Booking', F.col('Pay_or_Current_date_BL')).otherwise(F.col('Pay_or_Current_date')))
+    df = df.drop('Pay_or_Current_date_BL')
+    ##################################################################
+
+    # Join Holiday series & Weekend series
+    Holiday = Holiday_Table1
+    Holiday = Holiday.withColumn("Holidays", F.sequence(F.col('Holiday_start'), F.col('Holiday_end')))
+    Holiday = Holiday.groupBy('Country').agg(F.flatten(F.collect_set('Holidays')).alias('Holidays'))
+    Holiday = Holiday.withColumn('Weekend', F.array([F.to_date(F.lit(x),"yyyy-MM-dd") for x in weekend])).distinct()
+    df = df.join(Holiday,'Country','left')
+
+    # filter Pay_or_Current_date older than charge date
+    df = df.filter(F.col('Pay_or_Current_date') > F.col('charge_date'))
+    # Late pay days exclude Holiday/weekends
+    df = df.withColumn("Paydate_series", F.sequence(F.col('Pay_or_Current_date'), F.col('charge_date')))
+    df = df.withColumn('Holiday_except', F.when(F.col('Except_weekend') == 'Y', F.array_except(F.array_except(F.col('Paydate_series'), F.col('Holidays')), F.col('Weekend'))).otherwise(F.array_except(F.col('Paydate_series'), F.col('Holidays'))))
+    df = df.withColumn('days', F.size('Paydate_series') - 1)
+    df = df.withColumn('days_Holiday_excepted', F.when(F.col('Holidays').isNotNull(), F.size('Holiday_except') - 1).otherwise(F.col('days')))
+    df = df.withColumn('Late_pay_days', F.when(F.col('Except_public_holiday') == 'Y',F.col('days_Holiday_excepted')).otherwise(F.col('days')))
+    
+    # LPF need add
+    df = df.withColumn('LPF_need_Add', F.when(F.col('Late_pay_days') > F.col('Critiria_Tier_2').cast('integer'), F.col('Critiria_amount_3')).otherwise(F.when(F.col('Late_pay_days') > F.col('Critiria_Tier_1').cast('integer'), F.col('Critiria_amount_2')).otherwise(F.col('Critiria_amount_1'))))
+    df = df.withColumn('LPF_need_Add', F.when(F.col('Late_pay_days') >  F.col('free_day'), F.col('LPF_need_Add')))
+    df = df.withColumn('LPF_need_Add', F.col('LPF_need_Add').cast('integer'))
+
+    # OFAC
+    OFAC = ['Iran','North Korea','Syria','Sudan','Cuba', 'Venezuela']
+    df = df.withColumn('OFAC', F.when(F.col('POD_country').isin(*OFAC) | F.col('POR_country').isin(*OFAC), 'Y').otherwise('N'))
+    # invoice level, Cute off befor ETD 2020
+    df = df.filter((F.col('ETD') >= '2020-01-01') | F.col('ETD').isNull())
+
+    # Join AFR task status
+    afr_doc = multiple_AFR_check.filter(F.col('afr_task') =='Approve Freight Release (Documentation)').select(F.col('transport_doc_number').alias('alloc_nmbr'),F.col('afr_status').alias('AFR_DOC'))
+    afr_imp = multiple_AFR_check.filter(F.col('afr_task') =='Approve Freight Release (Import)').select(F.col('transport_doc_number').alias('alloc_nmbr'),F.col('afr_status').alias('AFR_IMP'))
+    df = df.join(afr_doc,'alloc_nmbr','left').join(afr_imp,'alloc_nmbr','left').distinct()
+
+    # BL level , Identify customer is credit/cash/CCRA_only by payment term
+    CCRA_exp_only = (F.size('BL_pmnttrms_exp') == 1) & (F.array_contains('BL_pmnttrms_exp','CCRA') | F.array_contains('BL_pmnttrms_exp','ICRA'))
+    CCRA_imp_only = (F.size('BL_pmnttrms_imp') == 1) & (F.array_contains('BL_pmnttrms_imp','CCRA') | F.array_contains('BL_pmnttrms_imp','ICRA'))
+    credit_rtxt = '([A-Z]{1}[1-9]?0?[1-9]?[A-Z]{1})'
+    df = df.withColumn('BL_pmnttrms_exp', F.array_sort('BL_pmnttrms_exp'))
+    df = df.withColumn('BL_pmnttrms_imp', F.array_sort('BL_pmnttrms_imp'))
+    df = df.withColumn('BL_credit_exp_txt', F.regexp_extract(F.col('BL_pmnttrms_exp').cast('string'), credit_rtxt,1))
+    df = df.withColumn('BL_credit_imp_txt', F.regexp_extract(F.col('BL_pmnttrms_imp').cast('string'), credit_rtxt,1))
+    df = df.withColumn('BL_Credit_Exp', F.when( F.length('BL_credit_exp_txt') == 4,'credit').when(CCRA_exp_only,'CCRA_only').otherwise(F.when(F.size('BL_pmnttrms_exp') >= 1,'cash')))
+    df = df.withColumn('BL_Credit_Imp', F.when(F.length('BL_credit_imp_txt') == 4,'credit').when(CCRA_imp_only,'CCRA_only').otherwise(F.when(F.size('BL_pmnttrms_imp') >= 1,'cash')))
+    df = df.drop('BL_credit_exp_txt').drop('BL_credit_imp_txt')
+    # LPF indentify Y/N    
+    # credit/cash match rule - adhoc position
+    N_cash_ex = (F.col('ref_key2').like("%EXP%")) & (F.col('BL_Credit_Exp') != 'cash')
+    N_cash_imp = (F.col('ref_key2').like("%IMP%")) & (F.col('BL_Credit_Imp') != 'cash')
+    df = df.withColumn('LPF_should',F.when((F.col('Credit_customer') == 'N') & (N_cash_ex | N_cash_imp),'N'))    
+    
+    # Exclude exception
+    # Canceled_shipment
+    df = df.withColumn('Canceled_shipment', F.when(F.col('ETD').isNull(),'Y').otherwise('N'))
+    # BL & invoce exceed threshold
+    df = df.withColumn('exceed_threshold', F.when((F.col('deb_cre_lc') > F.col('Value_threshold_USD') )& (F.col('BL_usd_amount') > F.col('Value_threshold_USD')),'Y').otherwise('N'))
+    # invoice Dispute status exception condition
+    dispute_status_rtxt = '(Accepted|progress|New|Redisputed)'
+    dispute_status_except_condition = F.regexp_extract(F.col('dispute_status').cast('string'), dispute_status_rtxt,1)
+    dispute_status_except_condition = dispute_status_except_condition.isNotNull() & (dispute_status_except_condition != '')
+    df = df.withColumn('except_dispute_status', F.when(dispute_status_except_condition, 'Y').otherwise('N'))
+
+    # LPF exclude_general
+    exclude_general = ( F.col('dunn_block').isNotNull() | F.col('pmnt_block').isNotNull() | (F.col('OFAC') == 'Y') | (F.col('LPF_inv') == 'Y') | (F.col('except_dispute_status') == 'Y') | (F.col('exceed_threshold') == 'N') | (F.col('Country_in_PORPOD') == 'N') | (F.col('Canceled_shipment') == 'Y'))
+    df = df.withColumn('LPF_should',F.when(exclude_general,'N').otherwise(F.col('LPF_should')))
+
+    # per Booking, BL Dispute status exception condition
+    dispute_status_except_condition_BL = F.regexp_extract(F.col('dispute_status_BL').cast('string'), dispute_status_rtxt,1)
+    dispute_status_except_condition_BL = dispute_status_except_condition_BL.isNotNull() & (dispute_status_except_condition_BL != '')
+    df = df.withColumn('except_dispute_status_BL', F.when(dispute_status_except_condition_BL, 'Y').otherwise('N'))
+    # per Booking, Exclude_condition_BL
+    Exclude_condition_BL = ((F.size('dunn_block_BL') >= 1) | (F.size('pmnt_block_BL') >= 1) | (F.col('except_dispute_status_BL') == 'Y'))
+    # per booking exclude
+    df = df.withColumn('LPF_should', F.when((F.col('Charge_per_BookingInvoice') == 'Booking') & Exclude_condition_BL, 'N').otherwise(F.col('LPF_should')))
+
+    # BL: total LPF need Add , when LPF need ADD Y : N
+    window = Window.partitionBy('comp_code','debitor','alloc_nmbr','bus_area','LPF_should')
+    df = df.withColumn('LPF_need_add_BL', F.when(F.col('Charge_per_BookingInvoice') == 'Invoice', F.sum('LPF_need_Add').over(window)).otherwise(F.min('LPF_need_Add').over(window)))
+    df = df.withColumn('GapOf_NeedAndApplied', F.when(F.col('LPF_applied_dc_BL').isNotNull(), F.col('LPF_need_add_BL') - F.col('LPF_applied_dc_BL')).otherwise(F.col('LPF_need_add_BL')))
+
+    # LPF need to add USD value by exchange_rate
+    Exchange_rate = Currency_exchange_rate.select(F.col('document_currency_code').alias('LPF_currency'), F.col('To_usd').alias('ex_rate'))
+    df = df.join(Exchange_rate,'LPF_currency','left')
+    df = df.withColumn('LPF_need_add_BL_usd', F.when(F.col('LPF_currency') == 'USD',F.col('LPF_need_add_BL')).otherwise(F.round(F.col('LPF_need_add_BL') * F.col('ex_rate'), 2)))
+    df = df.withColumn('GapOf_NeedAndApplied_usd', F.when(F.col('LPF_applied_USD_BL').isNotNull(), F.col('LPF_need_add_BL_usd') - F.col('LPF_applied_USD_BL')).otherwise(F.col('LPF_need_add_BL_usd')))
+
+    # Update application,today need to update
+    # per Booking, Exclude Case, LPF billed before, currently having open & cleared invoice under BL
+    Exclude_Case_BL = (F.col('LPF_billed') == 'Y') & F.col('clear_date_BL').isNotNull()
+    # exclude invoice cleared & per booking exclude case
+    df = df.withColumn('Today_apply', F.when(F.col('clear_date').isNotNull() | (Exclude_Case_BL & (F.col('Charge_per_BookingInvoice') == 'Booking')), 'N').otherwise(F.col('LPF_should')))
+
+    # Monitoring Monthly
+    df = df.withColumn('Month_ETD', F.month('ETD'))
+    return df
