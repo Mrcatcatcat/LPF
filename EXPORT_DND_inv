@@ -1,0 +1,14 @@
+def EXPORT_DND_inv(billing_document_item):
+    
+    # EXPORT_DND inv
+    EXPORT_DND_code = ['DME', 'DTE', 'DTS', 'EDT']
+    EXPORT_DND = billing_document_item.filter(F.col('billing_document_date') > '2019-12-01') \
+                                      .filter(F.col('charge_code').isin(EXPORT_DND_code)) \
+                                      .select('billing_document_id', 'billing_document_date').distinct()
+    EXPORT_DND = EXPORT_DND.join(billing_document_item,['billing_document_id', 'billing_document_date'],'inner') \
+                           .groupBy(F.col('billing_document_id').alias('ac_doc_no'), F.col('billing_document_date').alias('doc_date')) \
+                           .agg(F.collect_set('charge_code').alias('EXPORT_DND'))
+    # df = df.join(EXPORT_DND, ['ac_doc_no','doc_date'], 'left')
+    EXPORT_DND = EXPORT_DND.withColumn('EXPORT_DND_Inv', F.size(F.col('EXPORT_DND')))
+    EXPORT_DND = EXPORT_DND.withColumn('EXPORT_DND_Inv', F.when(F.col('EXPORT_DND_Inv') == 1, 'Y').otherwise('N'))
+    return EXPORT_DND
