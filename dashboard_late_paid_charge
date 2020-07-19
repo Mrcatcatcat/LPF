@@ -1,0 +1,18 @@
+def late_paid_charge(Global_LPF, billing_document_item):
+    APA_LPF = Global_LPFhttps://github.com/Mrcatcatcat/LPF
+    # LPF = APA_LPF.filter((F.col('Country') == 'Myanmar (Burma)') & F.col('LPF_need_Add').isNotNull())
+    # LPF = LPF.filter((F.col('BL_Credit_Exp') == 'cash') & (F.col('POR_country') == 'Myanmar (Burma)') | (F.col('BL_Credit_Imp') == 'cash') & (F.col('POD_country') == 'Myanmar (Burma)'))
+    # billing_items = billing_document_item.select(F.col('billing_document_id').alias('ac_doc_no'), F.col('billing_document_date').alias('doc_date'), 'charge_code')
+    # LPF = LPF.join(billing_items, ['ac_doc_no','doc_date'], 'left')
+
+    # LPF = LPF.groupby('ac_doc_no','alloc_nmbr','debitor','bus_area','comp_code','deb_cre_lc').agg(F.collect_set(F.col('charge_code')).alias('charge_code'))
+
+    LPF = APA_LPF.filter(F.col('LPF_need_Add').isNotNull())
+    LPF = LPF.filter(F.col('Country_in_PORPOD') == 'Y')
+    billing_items = billing_document_item.select(F.col('billing_document_id').alias('ac_doc_no'), F.col('billing_document_date').alias('doc_date'), 'charge_code','material_description')
+    LPF = LPF.join(billing_items, ['ac_doc_no','doc_date'], 'left')
+
+    LPF = LPF.groupby('ac_doc_no','alloc_nmbr','debitor','bus_area','comp_code','deb_cre_lc') \
+             .agg(F.collect_set(F.col('charge_code')).alias('charge_code'), F.collect_set(F.col('material_description')).alias('charge_name'))
+
+    return LPF
