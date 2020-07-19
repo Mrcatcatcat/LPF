@@ -1,0 +1,22 @@
+def  Currency_exchange_rate  (billing_document_item):
+
+    df = billing_document_item.filter((F.col('gcss_currency') == 'USD') & (F.col('document_currency_code') != 'USD') & (F.col('document_currency_code') != '')).filter(F.col('charge_code') == 'BAS')
+
+    df = df.filter(F.datediff(F.current_date(), F.col('billing_document_date')) <= 30) \
+           .filter((F.col('exchange_rate_gcss_to_document_currency') > 0) & 
+                   (F.col('exchange_rate_gcss_to_document_currency') != 1) & 
+                   (F.col('exchange_rate_gcss_to_document_currency').isNotNull()))
+    df = df.groupby('document_currency_code').agg(F.avg('exchange_rate_gcss_to_document_currency').alias('avg_ExRate_last30days'))
+    df = df.withColumn('To_usd', F.lit(1/F.col('avg_ExRate_last30days')))
+
+#  df = billing_document_item.filter((F.col('local_currency_code') == 'USD') & (F.col('document_currency_code') != 'USD') & (F.col('document_currency_code') != ''))
+#     df = df.filter(F.datediff(F.current_date(), F.col('billing_document_date')) <= 30) \
+#            .filter((F.col('exchange_rate_document_to_local_currency') > 0) & 
+#                    (F.col('exchange_rate_document_to_local_currency') != 1) & 
+#                    (F.col('exchange_rate_document_to_local_currency').isNotNull()))
+#     df = df.groupby('document_currency_code').agg(F.avg('exchange_rate_document_to_local_currency').alias('avg_ExRate_last30days'))
+
+
+
+    return df
+        
