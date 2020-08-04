@@ -1,0 +1,30 @@
+def test_prenotice_new(Prenotice_LPF):
+    df = Prenotice_LPF
+
+    df = df.withColumn('Pay_or_Current_date', F.date_add(F.current_date(),20))
+    df = df.withColumn("Paydate_series", F.sequence(F.col('Pay_or_Current_date'), F.col('charge_date')))
+    df = df.withColumn('Holiday_except', F.when(F.col('Except_weekend') == 'Y', F.array_except(F.array_except(F.col('Paydate_series'), F.col('Holidays')), F.col('Weekend'))).otherwise(F.array_except(F.col('Paydate_series'), F.col('Holidays'))))
+    df = df.withColumn('days', F.size('Paydate_series') - 1)
+    df = df.withColumn('days_Holiday_excepted', F.when(F.col('Holidays').isNotNull(), F.size('Holiday_except') - 1).otherwise(F.col('days')))
+    df = df.withColumn('Late_pay_days', F.when(F.col('Except_public_holiday') == 'Y',F.col('days_Holiday_excepted')).otherwise(F.col('days')))
+
+
+    df = df.withColumn('Holiday_N_week_except', F.array_except(F.array_except(F.col('Paydate_series'), F.col('Holidays')), F.col('Weekend')))
+
+
+    df = df.withColumn('Holiday_N_week_except',F.array_sort('Holiday_N_week_except'))
+    df = df.withColumn('today_position', F.array_position('Holiday_N_week_except',Today))
+    # df = df.withColumn('prenotice_Date', F.element_at('Holiday_except',F.col('today_position')+2))
+    df = df.withColumn('prenotice_Date', F.expr("Holiday_N_week_except[today_position+2]"))
+    df = df.filter(F.col('Holidays').isNotNull() & F.col('clear_date').isNull())
+    df = df.select('Paydate_series','days_Holiday_excepted','Holiday_except','Holiday_N_week_except','today_position', 'prenotice_Date','doc_date', 'netduedate','ETD/ETA','charge_date','Holiday_except','Except_weekend','Weekend')
+
+# today = 周一至周三-> prenotice date; lay paid date等于tier1+1
+# today = 周四至周五->prenotice date; lay paid date等于tier1+3
+
+# free_day
+# Critiria_Tier_1
+# Critiria_Tier_2
+
+
+    return df
